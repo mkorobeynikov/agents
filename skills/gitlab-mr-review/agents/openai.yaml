@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitLab MR Review"
+  short_description: "Доказательное ревью Merge Request в GitLab"
+  default_prompt: "Используй $gitlab-mr-review, чтобы провести доказательное ревью указанного GitLab MR."

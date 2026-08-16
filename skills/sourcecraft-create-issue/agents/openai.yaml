@@ -1,0 +1,4 @@
+interface:
+  display_name: "SourceCraft Issues"
+  short_description: "Create SourceCraft issues by API"
+  default_prompt: "Use $sourcecraft-create-issue to create a SourceCraft issue for this task."
