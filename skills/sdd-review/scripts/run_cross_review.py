@@ -109,10 +109,9 @@ class ReviewError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class Snapshot:
+class RepoDiff:
+    label: str
     repo: Path
-    change_id: str
-    change_dir: Path
     branch: str
     baseline: str | None
     baseline_commit: str | None
@@ -122,8 +121,16 @@ class Snapshot:
     commit_log: str
     changed_files: list[str]
     untracked_files: list[str]
-    requirement_files: list[str]
     standard_files: list[str]
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    change_id: str
+    change_dir: Path
+    spec: RepoDiff
+    code_repos: list[RepoDiff]
+    requirement_files: list[str]
     previous_review: str | None
 
 
@@ -135,6 +142,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--change-id", required=True)
     parser.add_argument("--baseline")
+    parser.add_argument(
+        "--code-repo",
+        action="append",
+        default=[],
+        metavar="PATH[=REF]",
+        help="code repository of a separate specification repository; "
+        "REF defaults to the merge-base with origin/HEAD",
+    )
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument(
         "--claude-bin",
@@ -269,57 +284,137 @@ def is_standard_file(path: str) -> bool:
     return name in exact or name.startswith("contributing.")
 
 
+def current_branch(repo: Path) -> str:
+    output = run_git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    return output.decode().strip() or "DETACHED"
+
+
+def remote_default_branch(repo: Path) -> str | None:
+    output = run_git(
+        repo,
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "refs/remotes/origin/HEAD",
+        check=False,
+    )
+    return output.decode().strip() or None
+
+
+def ensure_change_branch(repo: Path, branch: str) -> None:
+    base_branches = {"main", "master", "trunk"}
+    remote_default = remote_default_branch(repo)
+    if remote_default:
+        base_branches.add(remote_default.split("/", 1)[-1])
+    if branch in base_branches:
+        raise ReviewError(f"review must not run on base branch {branch} in {repo}")
+
+
+def resolve_code_baseline(repo: Path, requested: str | None) -> tuple[str, str]:
+    if requested:
+        if requested.startswith("-") or "\0" in requested:
+            raise ReviewError(f"baseline ref for {repo} is invalid")
+        commit = run_git(
+            repo, "rev-parse", "--verify", "--end-of-options", f"{requested}^{{commit}}"
+        )
+        return requested, commit.decode().strip()
+    remote_default = remote_default_branch(repo)
+    if not remote_default:
+        raise ReviewError(
+            f"cannot determine the base branch of {repo}: pass --code-repo {repo}=<ref>"
+        )
+    commit = run_git(repo, "merge-base", "HEAD", remote_default).decode().strip()
+    return f"merge-base HEAD {remote_default}", commit
+
+
+def display_label(spec_repo: Path, repo: Path) -> str:
+    try:
+        return repo.relative_to(spec_repo).as_posix()
+    except ValueError:
+        return str(repo)
+
+
+def prefixed(label: str, paths: list[str]) -> list[str]:
+    if label == ".":
+        return paths
+    return [f"{label}/{path}" for path in paths]
+
+
+def collect_diff(
+    repo: Path, label: str, baseline: str | None, baseline_commit: str | None
+) -> RepoDiff:
+    branch = current_branch(repo)
+    ensure_change_branch(repo, branch)
+    dirty = bool(run_git(repo, "status", "--porcelain=v1", "-z"))
+    untracked_files = decode_paths(
+        run_git(repo, "ls-files", "--others", "--exclude-standard", "-z")
+    )
+
+    if baseline_commit:
+        diff_target = baseline_commit if dirty else f"{baseline_commit}...HEAD"
+        commit_log = run_git(
+            repo, "log", "--oneline", f"{baseline_commit}..HEAD"
+        ).decode("utf-8", errors="replace")
+    else:
+        if not dirty:
+            raise ReviewError(f"baseline is unknown and the working tree is clean: {repo}")
+        diff_target = "HEAD"
+        commit_log = ""
+
+    diff = run_git(
+        repo, "diff", "--no-ext-diff", "--no-color", "--find-renames", diff_target
+    ).decode("utf-8", errors="replace")
+    changed_files = decode_paths(run_git(repo, "diff", "--name-only", "-z", diff_target))
+    tracked_files = decode_paths(run_git(repo, "ls-files", "-z"))
+    standard_files = sorted(
+        {path for path in tracked_files + untracked_files if is_standard_file(path)}
+    )
+
+    return RepoDiff(
+        label=label,
+        repo=repo,
+        branch=branch,
+        baseline=baseline,
+        baseline_commit=baseline_commit,
+        tree_state="dirty" if dirty else "clean",
+        diff_command=f"git diff {diff_target}",
+        diff=diff,
+        commit_log=commit_log,
+        changed_files=prefixed(label, sorted(set(changed_files + untracked_files))),
+        untracked_files=prefixed(label, untracked_files),
+        standard_files=prefixed(label, standard_files),
+    )
+
+
+def collect_code_repos(spec_repo: Path, values: list[str]) -> list[RepoDiff]:
+    code_repos: list[RepoDiff] = []
+    seen = {spec_repo}
+    for value in values:
+        path, _, requested = value.partition("=")
+        repo = resolve_repo(Path(path))
+        if repo in seen:
+            raise ReviewError(f"repository is passed twice or equals the spec repository: {repo}")
+        seen.add(repo)
+        baseline, baseline_commit = resolve_code_baseline(repo, requested or None)
+        code_repos.append(
+            collect_diff(repo, display_label(spec_repo, repo), baseline, baseline_commit)
+        )
+    return code_repos
+
+
 def collect_snapshot(
-    repo_path: Path, change_id: str, requested_baseline: str | None
+    repo_path: Path,
+    change_id: str,
+    requested_baseline: str | None,
+    code_repo_values: list[str],
 ) -> Snapshot:
     repo = resolve_repo(repo_path)
     change_dir = resolve_change_dir(repo, change_id)
     validate_change(change_dir)
 
-    branch_process = subprocess.run(
-        ["git", "-C", str(repo), "symbolic-ref", "--quiet", "--short", "HEAD"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    branch = (
-        branch_process.stdout.decode().strip()
-        if branch_process.returncode == 0
-        else "DETACHED"
-    )
-    if branch in {"main", "master"}:
-        raise ReviewError(f"review must not run on base branch {branch}")
-
     proposal_path = relative(repo, change_dir / "proposal.md")
     baseline, baseline_commit = resolve_baseline(repo, proposal_path, requested_baseline)
-    dirty = bool(run_git(repo, "status", "--porcelain=v1", "-z"))
-    tree_state = "dirty" if dirty else "clean"
-    untracked_files = decode_paths(
-        run_git(repo, "ls-files", "--others", "--exclude-standard", "-z")
-    )
-
-    if baseline:
-        diff_target = baseline if dirty else f"{baseline}...HEAD"
-        diff_command = f"git diff {diff_target}"
-        diff_args = [diff_target]
-        commit_log = run_git(repo, "log", "--oneline", f"{baseline}..HEAD").decode(
-            "utf-8", errors="replace"
-        )
-    else:
-        if not dirty:
-            raise ReviewError("baseline is unknown and the working tree is clean")
-        diff_target = "HEAD"
-        diff_command = "git diff HEAD"
-        diff_args = ["HEAD"]
-        commit_log = ""
-
-    diff = run_git(
-        repo, "diff", "--no-ext-diff", "--no-color", "--find-renames", *diff_args
-    ).decode("utf-8", errors="replace")
-    changed_files = decode_paths(
-        run_git(repo, "diff", "--name-only", "-z", *diff_args)
-    )
-    changed_files = sorted(set(changed_files + untracked_files))
+    spec = collect_diff(repo, ".", baseline, baseline_commit)
 
     requirement_paths = [change_dir / "proposal.md", change_dir / "tasks.md"]
     design = change_dir / "design.md"
@@ -327,30 +422,17 @@ def collect_snapshot(
         requirement_paths.append(design)
     requirement_paths.extend(sorted((change_dir / "specs").glob("*/spec.md")))
 
-    tracked_files = decode_paths(run_git(repo, "ls-files", "-z"))
-    standard_files = sorted(
-        {path for path in tracked_files + untracked_files if is_standard_file(path)}
-    )
     review_path = change_dir / "review.md"
     previous_review = (
         review_path.read_text(encoding="utf-8") if review_path.is_file() else None
     )
 
     return Snapshot(
-        repo=repo,
         change_id=change_id,
         change_dir=change_dir,
-        branch=branch,
-        baseline=baseline,
-        baseline_commit=baseline_commit,
-        tree_state=tree_state,
-        diff_command=diff_command,
-        diff=diff,
-        commit_log=commit_log,
-        changed_files=changed_files,
-        untracked_files=untracked_files,
+        spec=spec,
+        code_repos=collect_code_repos(repo, code_repo_values),
         requirement_files=[relative(repo, path) for path in requirement_paths],
-        standard_files=standard_files,
         previous_review=previous_review,
     )
 
@@ -370,19 +452,52 @@ def previous_round_prompt(snapshot: Snapshot) -> str:
 """
 
 
-def common_prompt(snapshot: Snapshot) -> str:
-    baseline = snapshot.baseline or "неизвестна; используется рабочий diff относительно HEAD"
-    metadata = {
-        "repository": str(snapshot.repo),
-        "change_id": snapshot.change_id,
-        "branch": snapshot.branch,
-        "baseline": baseline,
-        "baseline_commit": snapshot.baseline_commit,
-        "tree_state": snapshot.tree_state,
-        "diff_command": snapshot.diff_command,
-        "changed_files": snapshot.changed_files,
-        "untracked_files_to_read_fully": snapshot.untracked_files,
+def repo_metadata(diff: RepoDiff) -> dict[str, Any]:
+    return {
+        "path": diff.label,
+        "branch": diff.branch,
+        "baseline": diff.baseline or "неизвестна; используется рабочий diff относительно HEAD",
+        "baseline_commit": diff.baseline_commit,
+        "tree_state": diff.tree_state,
+        "diff_command": diff.diff_command,
+        "changed_files": diff.changed_files,
+        "untracked_files_to_read_fully": diff.untracked_files,
     }
+
+
+def repo_diff_prompt(diff: RepoDiff) -> str:
+    return f"""
+Коммиты после точки отсчёта в {diff.label}:
+<commit_log repository="{diff.label}">
+{diff.commit_log}
+</commit_log>
+
+Собранный diff {diff.label}:
+<repository_diff repository="{diff.label}">
+{diff.diff}
+</repository_diff>
+"""
+
+
+def code_repos_note(snapshot: Snapshot) -> str:
+    if not snapshot.code_repos:
+        return ""
+    return (
+        "- Это отдельный репозиторий спецификаций: sdd/ лежит в текущем каталоге, а реализация — "
+        "в репозиториях кода из code_repositories. Пути файлов даны относительно текущего каталога.\n"
+    )
+
+
+def common_prompt(snapshot: Snapshot) -> str:
+    metadata = {
+        "repository": str(snapshot.spec.repo),
+        "change_id": snapshot.change_id,
+        **repo_metadata(snapshot.spec),
+        "code_repositories": [repo_metadata(diff) for diff in snapshot.code_repos],
+    }
+    diffs = "".join(
+        repo_diff_prompt(diff) for diff in [snapshot.spec, *snapshot.code_repos]
+    )
     return f"""Ты — внешний leaf-reviewer SDD-изменения. Это один из двух независимых проходов.
 
 Жёсткие ограничения:
@@ -396,7 +511,7 @@ def common_prompt(snapshot: Snapshot) -> str:
 - Не придумывай доказательства. Если находку нельзя подтвердить точным местом и критерием, не включай её.
 - Прочитай каждый текстовый неотслеживаемый файл из метаданных целиком; бинарные файлы не считай дефектом только из-за их типа.
 - sdd/changes/{snapshot.change_id}/review.md — выходной артефакт ревью, а не реализация: не ищи в нём дефектов.
-
+{code_repos_note(snapshot)}
 Шкала severity; при сомнении выбирай более низкий уровень:
 - critical — ломает существующее поведение, теряет или портит данные, открывает уязвимость, либо ключевое требование не реализовано вовсе;
 - high — требование или Scenario не выполняется в реальном сценарии использования;
@@ -405,17 +520,7 @@ def common_prompt(snapshot: Snapshot) -> str:
 
 Метаданные ревью:
 {json.dumps(metadata, ensure_ascii=False, indent=2)}
-
-Коммиты после точки отсчёта:
-<commit_log>
-{snapshot.commit_log}
-</commit_log>
-
-Собранный diff:
-<repository_diff>
-{snapshot.diff}
-</repository_diff>
-""" + previous_round_prompt(snapshot)
+{diffs}""" + previous_round_prompt(snapshot)
 
 
 def requirements_prompt(snapshot: Snapshot) -> str:
@@ -435,10 +540,15 @@ def requirements_prompt(snapshot: Snapshot) -> str:
 
 
 def standards_prompt(snapshot: Snapshot, smells: str) -> str:
+    standard_files = [
+        path
+        for diff in [snapshot.spec, *snapshot.code_repos]
+        for path in diff.standard_files
+    ]
     return common_prompt(snapshot) + f"""
 Твоя единственная ось: standards. Не оценивай полноту реализации требований.
 
-Известные документы стандартов: {json.dumps(snapshot.standard_files, ensure_ascii=False)}.
+Известные документы стандартов: {json.dumps(standard_files, ensure_ascii=False)}.
 Найди и прочитай также релевантные вложенные AGENTS.md/CLAUDE.md для изменённых файлов, если они существуют.
 
 Проверь:
@@ -559,6 +669,7 @@ def run_claude(
     binary: str,
     model: str | None,
     repo: Path,
+    extra_dirs: list[Path],
     schema_path: Path,
     prompt: str,
     timeout: int,
@@ -583,6 +694,8 @@ def run_claude(
     ]
     if model:
         claude_args.extend(["--model", model])
+    for directory in extra_dirs:
+        claude_args.extend(["--add-dir", str(directory)])
     command = claude_command(binary, claude_args)
     process = subprocess.run(
         command,
@@ -687,8 +800,24 @@ def validate_axis(payload: dict[str, Any], expected_axis: str) -> None:
         require_string(criterion["quote"], f"{prefix}.criterion.quote")
 
 
+def review_summary(diff: RepoDiff) -> dict[str, Any]:
+    return {
+        "branch": diff.branch,
+        "baseline": diff.baseline,
+        "baseline_commit": diff.baseline_commit,
+        "tree_state": diff.tree_state,
+        "diff_command": diff.diff_command,
+    }
+
+
 def run_review(args: argparse.Namespace) -> dict[str, Any]:
-    snapshot = collect_snapshot(args.repo, args.change_id, args.baseline)
+    snapshot = collect_snapshot(
+        args.repo, args.change_id, args.baseline, args.code_repo
+    )
+    spec_repo = snapshot.spec.repo
+    outside_dirs = [
+        diff.repo for diff in snapshot.code_repos if diff.label == str(diff.repo)
+    ]
     backend = "claude" if args.caller == "codex" else "codex"
     binary_name = args.claude_bin if backend == "claude" else args.codex_bin
     binary = resolve_executable(binary_name)
@@ -719,7 +848,7 @@ def run_review(args: argparse.Namespace) -> dict[str, Any]:
                     binary,
                     model,
                     reasoning_effort,
-                    snapshot.repo,
+                    spec_repo,
                     schema_path,
                     prompts[axis],
                     args.timeout,
@@ -728,7 +857,8 @@ def run_review(args: argparse.Namespace) -> dict[str, Any]:
                 payload = run_claude(
                     binary,
                     model,
-                    snapshot.repo,
+                    spec_repo,
+                    outside_dirs,
                     schema_path,
                     prompts[axis],
                     args.timeout,
@@ -753,11 +883,11 @@ def run_review(args: argparse.Namespace) -> dict[str, Any]:
         },
         "review": {
             "change_id": snapshot.change_id,
-            "branch": snapshot.branch,
-            "baseline": snapshot.baseline,
-            "baseline_commit": snapshot.baseline_commit,
-            "tree_state": snapshot.tree_state,
-            "diff_command": snapshot.diff_command,
+            **review_summary(snapshot.spec),
+            "code_repos": [
+                {"path": diff.label, **review_summary(diff)}
+                for diff in snapshot.code_repos
+            ],
         },
         "requirements": results["requirements"],
         "standards": results["standards"],
