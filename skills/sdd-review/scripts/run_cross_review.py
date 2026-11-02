@@ -136,7 +136,7 @@ class Snapshot:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run isolated SDD review axes in the opposite model-family CLI."
+        description="Run isolated SDD review axes in fresh sessions of the caller CLI."
     )
     parser.add_argument("--caller", choices=("codex", "claude"), required=True)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
@@ -818,7 +818,7 @@ def run_review(args: argparse.Namespace) -> dict[str, Any]:
     outside_dirs = [
         diff.repo for diff in snapshot.code_repos if diff.label == str(diff.repo)
     ]
-    backend = "claude" if args.caller == "codex" else "codex"
+    backend = args.caller
     binary_name = args.claude_bin if backend == "claude" else args.codex_bin
     binary = resolve_executable(binary_name)
     model = args.claude_model if backend == "claude" else args.codex_model
