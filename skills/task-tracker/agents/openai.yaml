@@ -1,0 +1,4 @@
+interface:
+  display_name: "GBO Task Tracker"
+  short_description: "Задачи трекера task-tracker.gboteam.ru через API"
+  default_prompt: "Используй $task-tracker, чтобы прочитать указанную задачу трекера с комментариями."

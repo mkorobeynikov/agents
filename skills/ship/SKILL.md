@@ -78,10 +78,13 @@ Create a commit with this message format:
 ```
 
 **Rules:**
-- First line: imperative mood, lowercase start, max 72 characters
+- First line: a concise Russian noun phrase naming the substance of the change, without an initial verb or imperative mood. Start the text after the Conventional Commits prefix with a lowercase letter; keep the entire line within 72 characters. Example: `fix(impact): оценка полноты проверки с учётом пропущенных фаз`.
+- For SDD repositories, name the changed behavior, requirement, or corrected defect, not the creation or archival of documents.
 - Body: only for non-trivial changes, explain WHY not WHAT
 - Breaking changes: use `!` suffix — `feat!:` or `fix!:` — and describe in body
 - Use HEREDOC to pass the message to `git commit -m`
+
+If the user also requests an MR/PR title or description, follow «Оформление MR и PR» in the shared `AGENTS.md`. The commit title may be reused if it conveys the substance of the entire MR/PR. Use the same concise description structure for code and specifications. This guidance does not add MR/PR creation to the `ship` workflow.
 
 ### Step 5: Squash branch commits
 
@@ -114,6 +117,9 @@ After successful push, output a brief summary:
 - Commit type and scope
 - One-line description of what was committed
 - Branch name and remote
+- Verification evidence visible in the current work: which local tests/builds passed, or an explicit `not verified` if none were run
+
+`ship` verifies only repository operations such as staging, commit, and push. Do not present a successful push as evidence that the implementation works or is ready on a stand. Stand verification is outside this skill; report missing local verification as a limitation.
 
 ## Anti-patterns
 

@@ -1,0 +1,6 @@
+{
+  "name": "sdd-board",
+  "version": "0.1.0",
+  "description": "Панель SDD рядом с чатом: этапы активных изменений из sdd/changes, прогресс tasks.md и вердикт review.md",
+  "types": "./types/index.d.ts"
+}

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Harness Retro"
+  short_description: "Evidence-backed local agent retrospectives"
+  default_prompt: "Use $harness-retro to analyze recent local Codex and Claude Code sessions and propose reviewable harness improvements."
+policy:
+  allow_implicit_invocation: true
