@@ -75,14 +75,21 @@ Create a commit with this message format:
 <type>(<scope>): <описание на русском>
 
 <тело — опционально>
+
+BREAKING CHANGE: <описание несовместимости, только если она есть>
+Implements: <ключ задачи>[, <ключ другой задачи>]
 ```
 
 **Rules:**
 - First line: a concise Russian noun phrase naming the substance of the change, without an initial verb or imperative mood. Start the text after the Conventional Commits prefix with a lowercase letter; keep the entire line within 72 characters. Example: `fix(impact): оценка полноты проверки с учётом пропущенных фаз`.
 - For SDD repositories, name the changed behavior, requirement, or corrected defect, not the creation or archival of documents.
 - Body: only for non-trivial changes, explain WHY not WHAT
-- Breaking changes: use `!` suffix — `feat!:` or `fix!:` — and describe in body
+- Breaking changes: use `!` suffix — `feat!:` or `fix!:` — and describe the incompatibility in the `BREAKING CHANGE:` footer.
 - Use HEREDOC to pass the message to `git commit -m`
+- Футер отделять пустой строкой от тела, а при отсутствии тела — от заголовка. Строки необязательны независимо друг от друга: если присутствуют обе, сначала `BREAKING CHANGE:`, затем `Implements:`. Не оставлять пустые строки-заготовки.
+- Добавлять `Implements:` без дополнительного запроса, если в промпте или контексте есть точные ключи задач, явно связанных с изменениями этого коммита. Несколько ключей перечислять одной строкой через запятую с пробелом, без повторов.
+- Не включать ключи из примеров оформления, посторонние упоминания и задачи, не относящиеся к коммиту; не придумывать ключ по названию задачи или номеру MR. Если связанных ключей нет, строку опустить, не запрашивая задачу только ради футера. Если связь неоднозначна, уточнить её до коммита.
+- При squash определять `Implements:` по всему изменению ветки: учитывать связанные задачи всех входящих изменений, а не только последнего коммита; не переносить старые футеры слепо.
 
 If the user also requests an MR/PR title or description, follow «Оформление MR и PR» in the shared `AGENTS.md`. The commit title may be reused if it conveys the substance of the entire MR/PR. Use the same concise description structure for code and specifications. This guidance does not add MR/PR creation to the `ship` workflow.
 
@@ -130,4 +137,4 @@ After successful push, output a brief summary:
 - **Never** skip git hooks (`--no-verify`)
 - **Never** force push to `main`/`master`, and never plain `--force` anywhere — `--force-with-lease` on a feature branch after a step 5 squash is the only permitted rewrite
 - **Do not** update README for internal/cosmetic changes
-- **Do not** add Co-Authored-By or other trailers unless the user asks
+- **Do not** add Co-Authored-By or other trailers unless the user asks; `BREAKING CHANGE:` and `Implements:` are generated according to step 4.
